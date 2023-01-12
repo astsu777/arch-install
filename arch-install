@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+#=========================================================================
+# Author: Gaetan (gaetan@ictpourtous.com) - Twitter: @astsu777
+# Creation: Tue 05 Apr 2022 22:04:35
+# Last modified: Thu 12 Jan 2023 16:25:30
+# Version: 1.0
+#
+# Description: Arch Linux installation script
+#=========================================================================
+
+#=======================
+# VARIABLES
+#=======================
+
+# Logging
+date="$(date +%Y-%m-%d-%H%M%S)"
+logfile="$HOME/installation_log_$date.txt"
+
+# Disk
+if [ -d /sys/firmware/efi/efivars ]; then boot="uefi"; else boot="bios"; fi
+
+#=======================
+# FUNCTIONS
+#=======================
+
+# Log to/out of the console
+logc(){ tee -a "$logfile" ;}
+lognoc(){ tee -a "$logfile" > /dev/null 2>&1 ;}
+
+# Check if running from Arch ISO
+checkLive(){
+	if ! df ~ | grep -q 'airootfs'; then
+		echo -e 'Please only run this script via a live Arch environment!' 2>&1 | logc
+		echo -e 2>&1 | logc
+		exit 1
+	fi
+}
+
+# Check if connected to the Internet
+checkInternet(){
+	if ! curl --silent --output /dev/null archlinux.org; then
+		echo -e 'Please connect this computer to the Internet!' 2>&1 | logc
+		echo -e 2>&1 | logc
+		exit 2
+	else
+		echo -e 'Internet connection is OK.' 2>&1 | logc
+		echo -e 2>&1 | logc
+		timedatectl status 2>&1 | logc
+		echo -e 2>&1 | logc
+	fi
+}
+
+# Disk manipulation
+listDisks(){
+	fdisk -l 2>&1 | logc
+	echo -e 2>&1 | logc
+	echo -e '------------------------------------------------------------' 2>&1 | logc
+	echo -e 2>&1 | logc
+	lsblk 2>&1 | logc
+}
+
+setDisk(){
+	if printf %s "$REPLY" | grep -qE '^/dev/[a-z0-9]'; then
+		disk="$REPLY"
+	else
+		echo -e "$REPLY is not a valid disk!" 2>&1 | logc
+		err=1
+	fi
+}
+
+partDisk(){
+	local mem="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
+	local swap="$(($mem / 1024))"
+	if [ "$boot" = uefi ]; then
+		sed -e 's/\s*\([\+0-9a-zA-Z]*\).*/\1/' << EOF | fdisk "$disk"
+	g
+	n
+	1
+
+	+1M
+	n
+	2
+
+	+512M
+	n
+	3
+
+
+	t
+	1
+	4
+	t
+	2
+	1
+	t
+	3
+	43
+	w
+	q
+EOF
+	else
+		sed -e 's/\s*\([\+0-9a-zA-Z]*\).*/\1/' << EOF | fdisk "$disk"
+	o
+	n
+	p
+	1
+
+	+512M
+	n
+	p
+	2
+
+
+	a
+	1
+	t
+	2
+	8e
+	w
+	q
+EOF
+	fi
+}
+
+setPassphrase(){
+	passphrase="$REPLY"
+	if [ -z "$passphrase" ]; then echo "Please type a passphrase!"; fi
+}
+
+encryptDisk(){
+	encrypt=1
+	if [ "$boot" = uefi ]; then
+		echo -en "$passphrase" | cryptsetup --use-random -c aes-xts-plain -s 512 luksFormat --type luks1 "$disk"3
+    	echo -en "$passphrase" | cryptsetup open "$disk"3 cryptlvm
+    else
+		echo -en "$passphrase" | cryptsetup --use-random -c aes-xts-plain -s 512 luksFormat --type luks1 "$disk"2
+    	echo -en "$passphrase" | cryptsetup open "$disk"2 cryptlvm
+    fi
+}
+
+setupLVM(){
+	local mem="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
+	local swap="$(($mem / 1024))"
+	if [ "$boot" = uefi ]; then
+		if [ "$encrypt" = 1 ]; then
+			pvcreate /dev/mapper/cryptlvm
+			vgcreate vgroot /dev/mapper/cryptlvm
+		else
+			pvcreate "$disk"3
+			vgcreate vgroot "$disk"3
+		fi
+		lvcreate -L "$swap"M vgroot --name swap
+		lvcreate -l 100%FREE vgroot --name root
+		mkfs.fat -F 32 "$disk"2
+		mkfs.ext4 /dev/vgroot/root
+		mkswap /dev/vgroot/swap
+	else
+		if [ "$encrypt" = 1 ]; then
+			pvcreate /dev/mapper/cryptlvm
+			vgcreate vgroot /dev/mapper/cryptlvm
+		else
+			pvcreate "$disk"2
+			vgcreate vgroot "$disk"2
+		fi
+		lvcreate -L "$swap"M vgroot --name swap
+		lvcreate -l 100%FREE vgroot --name root
+		mkfs.ext4 boot "$disk"1
+		mkfs.ext4 /dev/vgroot/root
+		mkswap /dev/vgroot/swap
+	fi
+}
+
+#=======================
+# (LIVE) Configuration functions
+#=======================
+
+mountPartitions(){
+	mount /dev/vgroot/root /mnt
+	if [ "$boot" = uefi ]; then
+		mount --mkdir "$disk"2 /mnt/efi
+	else
+		mount --mkdir "$disk"1 /mnt/boot
+	fi
+	swapon /dev/vgroot/swap
+}
+
+baseInstall(){
+	pacstrap -K /mnt base base-devel linux-lts linux-lts-headers linux-firmware grub networkmanager lvm2 vim reflector
+	if [ "$boot" = uefi ]; then
+		pacstrap -K /mnt efibootmgr
+	fi
+	genfstab -U /mnt >> /mnt/etc/fstab
+}
+
+enterChroot(){
+	cp "$0" /mnt/setup.sh
+	sed -i "/^# Disk/a boot=$boot" /mnt/setup.sh
+	sed -i "/^# Disk/a disk=$disk" /mnt/setup.sh
+	sed -i "/^# Disk/a encrypt=$encrypt" /mnt/setup.sh
+}
+
+#=======================
+# (CHROOT) Configuration functions
+#=======================
+
+## Disabled because it eats up too much screen space (maybe use screen?)
+# listTimezones(){
+# 	timedatectl list-timezones | column | more
+# }
+
+getTimezone(){
+	if printf %s "$REPLY" | grep -qE '[A-z/]'; then
+		timezone="$REPLY"
+	else
+		echo -e "$REPLY is not a valid timezone!" 2>&1 | logc
+	fi
+}
+
+setTimezone(){
+	ln -sf /usr/share/zoneinfo/"$timezone" /etc/localtime
+	hwclock --systohc
+}
+
+setLocale(){
+    sed -i '/^#en_US.UTF-8 UTF-8/c en_US.UTF-8 UTF-8' /etc/locale.gen
+	echo 'LANG="en_US.UTF-8"' > /etc/locale.conf
+	echo "KEYMAP=us-acentos" > /etc/vconsole.conf
+    locale-gen
+}
+
+setHostname(){
+	echo "$hostname" > /etc/hostname
+    cat > /etc/hosts <<EOF
+127.0.0.1 localhost.localdomain localhost
+::1       localhost.localdomain localhost
+127.0.1.1 $hostname.localdomain $hostname
+EOF
+}
+
+setupMkinitCPIO(){
+	if [ "$encrypt" = 1 ]; then
+		sed -i '/^MODULES=/c MODULES=(ext4)' /etc/mkinitcpio.conf
+		sed -i '/^HOOKS=/c HOOKS=(base udev autodetect keyboard keymap consolefont modconf block encrypt lvm2 resume filesystems fsck)' /etc/mkinitcpio.conf
+		dd bs=512 count=4 if=/dev/random of=/boot/cryptlvm_keyfile.bin iflag=fullblock && chmod 600 /boot/cryptlvm_keyfile.bin
+		sed -i '/^FILES=/c FILES=(/boot/cryptlvm_keyfile.bin)' /etc/mkinitcpio.conf
+		if [ "$boot" = uefi ]; then
+			cryptsetup luksAddKey "$disk"3 /boot/cryptlvm_keyfile.bin
+		else
+			cryptsetup luksAddKey "$disk"2 /boot/cryptlvm_keyfile.bin
+		fi
+	else
+		sed -i '/^HOOKS=/c HOOKS=(base udev autodetect modconf block lvm2 resume filesystems keyboard fsck)' /etc/mkinitcpio.conf
+	fi
+	mkinitcpio -P
+}
+
+setupGrub(){
+	local swapuuid="$(blkid /dev/mapper/vgroot-swap | awk '{print $2}' | sed 's/\"//g')"
+	sed -i '/^GRUB_TIMEOUT/c GRUB_TIMEOUT=2' /etc/default/grub
+	sed -i "/^GRUB_CMDLINE_LINUX_DEFAULT=/c GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet resume=$swapuuid\"" /etc/default/grub
+	if [ "$encrypt" = 1 ]; then
+		if [ "$boot" = uefi ]; then
+			local uuid="$(blkid "$disk"3 | awk '{print $2}' | sed 's/\"//g')"
+		else
+			local uuid="$(blkid "$disk"2 | awk '{print $2}' | sed 's/\"//g')"
+		fi
+		sed -i "/^#GRUB_ENABLE_CRYPTODISK=/c GRUB_ENABLE_CRYPTODISK=y" /etc/default/grub
+		sed -i "/^GRUB_CMDLINE_LINUX=/c GRUB_CMDLINE_LINUX=\"cryptdevice=$uuid:cryptlvm cryptkey=rootfs:/boot/cryptlvm_keyfile.bin root=/dev/vgroot/root\"" /etc/default/grub
+	fi
+	if [ "$boot" = uefi ]; then
+		grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB --recheck
+	else
+		grub-install --target=i386-pc --recheck "$disk"
+	fi
+	grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+setupSvc(){
+	systemctl enable NetworkManager
+	systemctl enable reflector
+	systemctl enable fstrim.timer
+}
+
+setupUser(){
+	echo -e "Enter the password for the root user: " 2>&1 | logc
+	passwd
+}
+
+#=======================
+# MAIN
+#=======================
+
+configure(){
+	clear
+	echo -e
+	echo -e '     ___              __       ____           __        ____         '
+	echo -e '    /   |  __________/ /_     /  _/___  _____/ /_____ _/ / /__  _____'
+	echo -e '   / /| | / ___/ ___/ __ \    / // __ \/ ___/ __/ __ `/ / / _ \/ ___/'
+	echo -e '  / ___ |/ /  / /__/ / / /  _/ // / / (__  ) /_/ /_/ / / /  __/ /    '
+	echo -e ' /_/  |_/_/   \___/_/ /_/  /___/_/ /_/____/\__/\__,_/_/_/\___/_/     '
+	echo -e "" 2>&1 | logc
+	echo -e " The file \"$logfile\" will be created to log all ongoing operations" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Check all prerequisites
+	checkLive && checkInternet
+
+	# Disk partitioning
+	echo -e "The following disks are present on your system:" 2>&1 | logc
+	echo -e 2>&1 | logc
+	listDisks
+	echo -e 2>&1 | logc
+	echo -e "Automatic partitioning will use an entire disk to install Arch Linux." 2>&1 | logc
+	echo -e "It will create a dedicated /boot partition, a swap partition and a root partition." 2>&1 | logc
+	while read -p "Do you want the disk partitioning to be done automatically? (Y/n) " -n 1 -r; do
+	echo -e 2>&1 | logc
+		if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+			while read -p "What disk should Arch Linux be installed on? (Ex: /dev/sda) " -r; do
+				setDisk
+				if [ -z "$err" ]; then break; else err= && continue; fi
+			done
+			echo -e "Partitioning the disk..." 2>&1 | logc
+			partDisk
+			echo -e "Partitioning completed" 2>&1 | logc
+		elif [[ "$REPLY" =~ ^[Nn]$ ]]; then
+			echo -e "Manual partitioning will be performed..." 2>&1 | logc
+			sleep 2 && cfdisk
+			echo -e "Manual partitioning completed" 2>&1 | logc
+		fi
+		echo -e 2>&1 | logc
+		break
+	done
+
+	# LVM configuration
+	while read -p "Do you want to encrypt the hard drive? (Y/n) " -n 1 -r; do
+	echo -e 2>&1 | logc
+		if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+			while read -p "Type a passphrase to decrypt the disk: " -r -s; do
+				setPassphrase
+				break
+			done
+			echo -e 2>&1 | logc
+			echo -e "Encrypting the disk..." 2>&1 | logc
+			encryptDisk
+			echo -e "Disk successfully encrypted" 2>&1 | logc
+		fi
+		echo -e "Setting up LVM..." 2>&1 | logc
+		setupLVM
+		echo -e "LVM successfully configured" 2>&1 | logc
+		echo -e 2>&1 | logc
+		break
+	done
+
+	# Mount new installation
+	echo -e "Mounting partitions of new installation..." 2>&1 | logc
+	mountPartitions
+	echo -e "Partitions mounted" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Initial installation
+	echo -e "Installing the base system..." 2>&1 | logc
+	baseInstall
+	echo -e "Base installation done" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Enter CHROOT
+	echo -e "Preparing CHROOT..." 2>&1 | logc
+	enterChroot
+	echo -e "CHROOT prepared" 2>&1 | logc
+	echo -e 2>&1 | logc
+	echo -e "#############################################################" 2>&1 | logc
+	echo -e "# PLEASE RUN 'arch-chroot /mnt' and run './setup.sh chroot' #" 2>&1 | logc
+	echo -e "#############################################################" 2>&1 | logc
+	echo -e 2>&1 | logc
+}
+
+setup(){
+    clear
+    echo -e
+    echo -e '     ___              __       ______            _____      '
+	echo -e '	 /   |  __________/ /_     / ____/___  ____  / __(_)___ _'
+    echo -e '   / /| | / ___/ ___/ __ \   / /   / __ \/ __ \/ /_/ / __ `/'
+    echo -e '  / ___ |/ /  / /__/ / / /  / /___/ /_/ / / / / __/ / /_/ / '
+    echo -e ' /_/  |_/_/   \___/_/ /_/   \____/\____/_/ /_/_/ /_/\__, /  '
+    echo -e '                                              	    /____/   '
+	echo -e "" 2>&1 | logc
+	echo -e " The file \"$logfile\" will be created to log all ongoing operations" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Timezone configuration
+	## Disabled because it eats up too much screen space (maybe use screen?)
+	# echo -e "The following time zones are available: " 2>&1 | logc
+	# listTimezones
+	# echo -e 2>&1 | logc
+	while read -p "What timezone should the system uses (Ex.: Europe/Paris)? " -r; do
+		getTimezone
+		break
+	done
+	setTimezone
+	echo -e 2>&1 | logc
+
+	# Locale configuration
+	echo -e "Configuring & generating locales..." 2>&1 | logc
+	setLocale
+	echo -e "Locale configured" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Set the hostname
+	while read -p "What name your computer should use? " -r hostname; do
+		if [[ "$hostname" =~ ^[a-zA-Z0-9-]{1,15}$ ]]; then
+			setHostname
+			echo -e "Computer's name successfully configured" 2>&1 | logc
+			echo -e 2>&1 | logc
+			break
+		else
+			echo -e "Invalid computer name! The name should be between 1 and 15 characters and must not contain special characters except \"-\"" 2>&1 | logc
+			echo -e 2>&1 | logc
+			continue
+		fi
+	done
+
+	# Configure and generate Initramfs
+	echo -e "Configuring & generating Initramfs..." 2>&1 | logc
+	setupMkinitCPIO
+	echo -e "Initramfs configured" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Services configuration
+	echo -e "Setting system services..." 2>&1 | logc
+	setupSvc
+	echo -e "System services configured" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# Root configuration
+	setupUser
+	echo -e "Root account configured" 2>&1 | logc
+	echo -e 2>&1 | logc
+
+	# GRUB
+	echo -e "Configuring GRUB..." 2>&1 | logc
+	setupGrub
+	echo -e "GRUB successfully configured" 2>&1 | logc
+	echo -e 2>&1 | logc
+}
+
+#=======================
+# BEGINNING
+#=======================
+
+# Installation & configuration
+if [ "$1" = "chroot" ]; then setup; else configure; fi
+
