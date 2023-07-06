@@ -2,7 +2,7 @@
 #=========================================================================
 # Author: Gaetan (gaetan@ictpourtous.com) - Twitter: @astsu777
 # Creation: Tue 05 Apr 2022 22:04:35
-# Last modified: Thu 12 Jan 2023 16:25:30
+# Last modified: Thu 06 Jul 2023 13:24:18
 # Version: 1.0
 #
 # Description: Arch Linux installation script
@@ -277,6 +277,7 @@ setupGrub(){
 
 setupSvc(){
 	systemctl enable NetworkManager
+	systemctl enable NetworkManager-dispatcher
 	systemctl enable reflector
 	systemctl enable fstrim.timer
 }
