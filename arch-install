@@ -2,7 +2,7 @@
 #=========================================================================
 # Author: Gaetan (gaetan@ictpourtous.com) - Twitter: @astsu777
 # Creation: Tue 05 Apr 2022 22:04:35
-# Last modified: Mon 19 Aug 2024 13:28:49
+# Last modified: Mon 19 Aug 2024 13:47:53
 # Version: 1.0
 #
 # Description: Arch Linux installation script
@@ -53,6 +53,7 @@ checkInternet(){
 # Make sure time is synced with NTP server
 syncTime(){
 	echo -e 'Fallback NTP servers enabled for live environment' 2>&1 | logc
+	sed -i "s/#NTP/NTP=pool.ntp.org/" /etc/systemd/timesyncd.conf
 	sed -i "s/#FallbackNTP/FallbackNTP/" /etc/systemd/timesyncd.conf
 	echo -e 2>&1 | logc
 	systemctl restart systemd-timesyncd
