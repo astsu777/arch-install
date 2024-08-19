@@ -33,8 +33,8 @@ From a general perspective, the script should work on pretty much any standard l
 It is recommended to download the script and execute it locally. In order to so, type the following commands:
 
 ```
-curl -LO https://raw.githubusercontent.com/astsu777/arch-install/master/arch-install)
-./arch-install
+curl -LO https://raw.githubusercontent.com/astsu777/arch-install/master/arch-install
+bash arch-install
 ```
 
 # Log
